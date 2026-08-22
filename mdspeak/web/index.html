@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mdspeak</title>
+<style>
+  /* ======================================================================
+     mdspeak — design system
+
+     Structure from the MODiCom design system (~/__code__/modicom,
+     src/index.css + docs/principles/design.md): a ratio-based type scale,
+     uppercase micro-labels with wide tracking, tabular numerals, surfaces
+     separated by elevation and tint rather than borders, fixed-height pill
+     controls, paired accent/ink tokens, functional motion. Borrowed for how
+     well it is made, not for how it looks — its warm neutrals and teal accent
+     are deliberately not taken.
+
+     Colour from the Aura Dark VS Code theme (daltonmenezes.aura-theme), so
+     this agrees with the editor whose output it reads aloud. Values marked
+     (aura) are verbatim; the surface ramp is derived, because Aura publishes
+     an editor background and a sidebar background and a UI needs four levels.
+
+     Dark only — Aura ships no light variant, and inventing one would mean a
+     palette that isn't the user's. The old prefers-color-scheme block is gone
+     rather than left to drift.
+
+     Contrast is measured, not eyeballed. Worst text case is --ink-faint on
+     --panel-2 at 4.53:1. The measurement that shaped the palette: every Aura
+     accent fails as a fill under white text (purple 3.17:1, mint 1.26:1) —
+     they are text colours on a dark ground, not backgrounds for light text —
+     so --accent-ink is dark, and pairing every fill with its own foreground is
+     what lets the accent change later without breaking contrast silently.
+
+     Type stays on the system stack. This app's own subtitle promises nothing
+     leaves the machine; fetching webfonts from a CDN on every launch would
+     contradict that, and would also fail offline for a local tool.
+     ====================================================================== */
+  :root{
+    /* Surfaces lighten as they approach the viewer. Not pure black: #000 under
+       light text causes halation, worse for long reading and for astigmatism. */
+    --bg:#15141b;        /* (aura) editor.background */
+    --panel:#1e1c26;
+    --panel-2:#262232;
+    --sunken:#110f18;    /* (aura) sideBar.background */
+    --line:#2e2b38;      /* (aura) list.activeSelectionBackground */
+
+    --ink:#edecee;       /* (aura) editor.foreground */
+    --ink-dim:#adacae;   /* (aura) */
+    --ink-faint:#8b8a93;
+
+    --accent:#a277ff;    /* (aura) keywords, badge — the brand */
+    --accent-ink:#15141b;/* dark, because purple under white is only 3.17:1 */
+    --ok:#61ffca;        /* (aura) strings — "clean", the positive signal */
+    --danger:#ff6767;    /* (aura) invalid, deleted */
+
+    /* Radii — pill-first. Every control is fully rounded; only containers get
+       a corner radius. Mixing pills and rounded rectangles in one toolbar is
+       the fastest way to look assembled rather than designed. */
+    --r:18px; --r-sm:999px;
+
+    /* Type — a real ratio-based scale. Weak hierarchy (everything 13–15px) is
+       the single thing that makes an interface read as an unstyled prototype. */
+    --t-micro:11px; --t-label:12px; --t-small:13px; --t-body:15px;
+    --t-title:22px;
+    --track-label:.08em;
+
+    /* Elevation. On a dark ground a shadow carries little information —
+       elevation comes from the surface lightening. These mostly seat an
+       element rather than lift it. */
+    --shadow:0 1px 2px -1px rgb(0 0 0 /.5), 0 4px 16px -4px rgb(0 0 0 /.45);
+
+    /* Motion — one vocabulary: confirm, guide, show progress. No bounce. */
+    --ease:cubic-bezier(.16,1,.3,1);
+    --fast:180ms; --base:260ms;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  /* The control system sets `display` on button/select/label, which outranks
+     the UA's `[hidden]{display:none}` — so `el.hidden = true` silently stopped
+     hiding anything (the Tone select was showing for engines that have no
+     emotion control). Restated with !important so the attribute keeps working
+     no matter what a component rule sets. */
+  [hidden]{display:none !important}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:var(--t-body)/1.55 ui-sans-serif,-apple-system,"SF Pro Text",Inter,system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased; display:flex; justify-content:center;
+    padding:34px 22px 46px;
+  }
+
+  /* A faint wash behind everything. Structural, not decorative: it gives the
+     frosted panels something to actually be translucent over (a blurred panel
+     on a flat fill is just a different flat fill), and stops a large empty
+     dark page reading as a dead rectangle. */
+  body::before{
+    content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
+    background:
+      radial-gradient(60rem 40rem at 12% -10%, color-mix(in oklab,var(--accent) 14%,transparent), transparent 70%),
+      radial-gradient(50rem 38rem at 92% 100%, color-mix(in oklab,var(--ok) 6%,transparent), transparent 70%);
+  }
+
+  main{width:100%; max-width:780px; display:flex; flex-direction:column; gap:18px}
+
+  header{display:flex; align-items:baseline; gap:12px; flex-wrap:wrap}
+  h1{font-size:var(--t-title); font-weight:600; letter-spacing:-.025em; margin:0}
+  .sub{color:var(--ink-faint); font-size:var(--t-small)}
+
+  /* Separated from the page by elevation and tint, not by an outline. A 1px
+     line says "two unrelated rectangles meet here"; depth says "this sits
+     above that", which is what is true. The only hairline is an inset
+     highlight along the top edge — a lit surface catching light, not a box. */
+  .card{
+    background:color-mix(in oklab,var(--panel) 82%,transparent);
+    -webkit-backdrop-filter:blur(20px) saturate(1.4);
+    backdrop-filter:blur(20px) saturate(1.4);
+    border-radius:var(--r);
+    box-shadow:var(--shadow), inset 0 1px 0 color-mix(in oklab,var(--ink) 7%,transparent);
+  }
+
+  /* A recessed well, as a tint of the *text* colour rather than its own fill
+     plus an inset shadow — an inset shadow draws a hard dark line along the
+     top edge, which is a border in everything but name. */
+  textarea{
+    width:100%; min-height:230px; resize:vertical; padding:16px 18px;
+    background:color-mix(in oklab,var(--ink) 6%,transparent);
+    color:var(--ink); border:0; outline:0;
+    border-radius:var(--r); font:13.5px/1.65 ui-monospace,"SF Mono",Menlo,monospace;
+    transition:background var(--fast) var(--ease);
+  }
+  textarea:focus{background:color-mix(in oklab,var(--ink) 9%,transparent)}
+  textarea::placeholder{color:var(--ink-faint)}
+
+  .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+  .row.between{justify-content:space-between}
+
+  label.field{display:flex; align-items:center; gap:8px; font-size:var(--t-small); color:var(--ink-dim)}
+
+  /* Controls are a system with fixed heights, so a select and a button on the
+     same row line up structurally rather than by coincidence of padding. */
+  select,button{
+    height:38px; border-radius:var(--r-sm); font:inherit; font-size:var(--t-small);
+    transition:background-color var(--fast) var(--ease),
+               color var(--fast) var(--ease), opacity var(--fast) var(--ease);
+  }
+  select{
+    appearance:none; background-color:color-mix(in oklab,var(--ink) 8%,transparent);
+    color:var(--ink); border:0; padding:0 30px 0 14px; cursor:pointer;
+    background-image:linear-gradient(45deg,transparent 50%,var(--ink-faint) 50%),
+                     linear-gradient(135deg,var(--ink-faint) 50%,transparent 50%);
+    background-position:calc(100% - 16px) 52%, calc(100% - 11px) 52%;
+    background-size:5px 5px,5px 5px; background-repeat:no-repeat;
+  }
+  select:disabled{opacity:.45; cursor:not-allowed}
+
+  .check{display:flex; align-items:center; gap:7px; font-size:var(--t-small); color:var(--ink-dim); cursor:pointer; user-select:none}
+  .check input{accent-color:var(--accent); width:15px; height:15px; cursor:pointer}
+
+  button{
+    display:inline-flex; align-items:center; justify-content:center; gap:.5rem;
+    font-weight:500; cursor:pointer; white-space:nowrap; border:0;
+    background:color-mix(in oklab,var(--ink) 8%,transparent); color:var(--ink);
+    padding:0 16px;
+  }
+  button:hover:not(:disabled){background:color-mix(in oklab,var(--ink) 13%,transparent)}
+  button:disabled{opacity:.4; cursor:not-allowed}
+  button.primary{background:var(--accent); color:var(--accent-ink); font-weight:600}
+  button.primary:hover:not(:disabled){background:color-mix(in oklab,var(--accent) 88%,white)}
+  button.ghost{background:transparent}
+  button.ghost:hover:not(:disabled){background:color-mix(in oklab,var(--ink) 8%,transparent)}
+
+  /* One focus ring app-wide, so keyboard focus is unmistakable without every
+     control reinventing it. Offset so it never crowds the element. */
+  :is(button,select,textarea,summary,a,input,.scrub):focus-visible{
+    outline:2px solid var(--accent); outline-offset:2px;
+  }
+
+  .hint{font-size:12.5px; color:var(--ink-faint)}
+  .hint b{color:var(--ink-dim); font-weight:600}
+  .hint a{color:var(--ink-dim)}
+  .warn{color:var(--danger)}
+
+  /* ---- preview ---- */
+  /* A divider that fades at both ends instead of running wall to wall. The
+     fade is what removes the drawn-line quality: the eye reads a separation
+     without registering a rule. */
+  details.preview{padding:0; position:relative}
+  details.preview::before{
+    content:""; position:absolute; top:0; left:0; right:0; height:1px;
+    background:linear-gradient(to right, transparent,
+      color-mix(in oklab,var(--ink) 14%,transparent) 15%,
+      color-mix(in oklab,var(--ink) 14%,transparent) 85%, transparent);
+  }
+  details.preview summary{
+    padding:12px 18px; cursor:pointer; font-size:var(--t-small); color:var(--ink-dim);
+    list-style:none; display:flex; justify-content:space-between; align-items:center;
+    gap:12px; border-radius:var(--r);
+  }
+  details.preview summary::-webkit-details-marker{display:none}
+  details.preview summary:hover{color:var(--ink)}
+  pre.spoken{
+    margin:0; padding:0 18px 18px; white-space:pre-wrap; word-break:break-word;
+    font:13px/1.7 ui-sans-serif,system-ui,sans-serif; color:var(--ink-dim); max-height:260px; overflow:auto;
+    scrollbar-width:thin; scrollbar-color:var(--line) transparent;
+  }
+
+  /* The uppercase micro-label. Cheap, and it does more for perceived quality
+     than almost anything else — it says there is a system with named levels
+     rather than just bigger and smaller text. The wide tracking is required;
+     uppercase without it reads as shouting. */
+  .badge{
+    font-size:var(--t-micro); font-weight:600; letter-spacing:var(--track-label);
+    text-transform:uppercase; padding:4px 10px; border-radius:999px;
+    background:color-mix(in oklab,var(--ink) 8%,transparent); color:var(--ink-faint);
+    white-space:nowrap;
+  }
+  .badge.ok{background:color-mix(in oklab,var(--ok) 14%,transparent); color:var(--ok)}
+  .badge.bad{background:color-mix(in oklab,var(--danger) 16%,transparent); color:var(--danger)}
+
+  /* ---- player ---- */
+  .player{padding:16px 18px; display:none; flex-direction:column; gap:13px}
+  .player.on{display:flex}
+  .scrub{
+    position:relative; height:26px; display:flex; align-items:center; cursor:pointer;
+    border-radius:999px;
+  }
+  .scrub .track{position:absolute; left:0; right:0; height:5px; border-radius:99px; background:color-mix(in oklab,var(--ink) 10%,transparent)}
+  .scrub .fill{position:absolute; left:0; height:5px; border-radius:99px; background:var(--accent); width:0}
+  .scrub .knob{
+    position:absolute; width:13px; height:13px; border-radius:99px; background:var(--accent);
+    left:0; margin-left:-6.5px; box-shadow:0 0 0 4px color-mix(in oklab,var(--accent) 22%,transparent);
+    opacity:0; transition:opacity var(--fast) var(--ease);
+  }
+  .scrub:hover .knob,.scrub:focus-visible .knob{opacity:1}
+
+  /* Tabular figures, so a running clock doesn't reflow the row on every tick. */
+  .times{
+    display:flex; justify-content:space-between; color:var(--ink-faint);
+    font:var(--t-label)/1 ui-monospace,Menlo,monospace;
+    font-variant-numeric:tabular-nums;
+  }
+  .transport{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+  /* Icon buttons share the row height so they align with labelled siblings,
+     and clear the WCAG 2.2 AA (2.5.8) 24px target floor with room to spare. */
+  .icon{width:38px; height:38px; padding:0; display:grid; place-items:center; border-radius:999px}
+  .icon.big{width:44px; height:44px; background:var(--accent); color:var(--accent-ink)}
+  .icon.big:hover:not(:disabled){background:color-mix(in oklab,var(--accent) 88%,white)}
+  .speeds{
+    display:flex; gap:4px; margin-left:auto; padding:3px; border-radius:999px;
+    background:color-mix(in oklab,var(--ink) 8%,transparent);
+  }
+  .speeds button{
+    height:30px; background:transparent; border-radius:999px; padding:0 11px;
+    font-size:12.5px; color:var(--ink-dim); font-variant-numeric:tabular-nums;
+  }
+  .speeds button[aria-pressed="true"]{background:var(--accent); color:var(--accent-ink); font-weight:600}
+
+  .progress{height:3px; background:color-mix(in oklab,var(--ink) 10%,transparent); border-radius:99px; overflow:hidden}
+  .progress i{display:block; height:100%; width:0; background:var(--accent); transition:width var(--base) var(--ease)}
+
+  .status{font-size:var(--t-small); color:var(--ink-dim); min-height:19px}
+  kbd{
+    font:var(--t-micro)/1 ui-monospace,Menlo,monospace;
+    border-radius:5px; padding:3px 6px; color:var(--ink-faint);
+    background:color-mix(in oklab,var(--ink) 10%,transparent);
+  }
+
+  /* The OS reduce-motion setting is a first-class case, not an afterthought. */
+  @media (prefers-reduced-motion:reduce){
+    *,*::before,*::after{
+      animation-duration:.01ms !important; animation-iteration-count:1 !important;
+      transition-duration:.01ms !important;
+    }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>mdspeak</h1>
+    <span class="sub">markdown, read aloud — local MLX, nothing leaves this machine</span>
+  </header>
+
+  <section class="card">
+    <textarea id="md" spellcheck="false"
+      placeholder="Paste your coding agent's markdown here…"></textarea>
+
+    <details class="preview" id="prevWrap">
+      <summary>
+        <span>What the voice will actually say</span>
+        <span class="badge" id="leakBadge">—</span>
+      </summary>
+      <pre class="spoken" id="spoken"></pre>
+    </details>
+  </section>
+
+  <section class="row between">
+    <div class="row">
+      <label class="field">Engine
+        <select id="engine"></select>
+      </label>
+      <label class="field" id="voiceWrap" hidden>Voice
+        <select id="voice"></select>
+      </label>
+      <label class="field" id="emoWrap" hidden>Tone
+        <select id="emotion"></select>
+      </label>
+      <label class="check"><input type="checkbox" id="readCode"> read code aloud</label>
+    </div>
+    <div class="row">
+      <button class="ghost" id="cancel" hidden>Stop</button>
+      <button class="primary" id="speak">Read it</button>
+    </div>
+  </section>
+
+  <div class="status" id="status"></div>
+  <div class="progress" id="progWrap" hidden><i id="prog"></i></div>
+
+  <section class="card player" id="player">
+    <div class="scrub" id="scrub" tabindex="0" role="slider"
+         aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div class="track"></div><div class="fill" id="fill"></div><div class="knob" id="knob"></div>
+    </div>
+    <div class="times"><span id="tCur">0:00</span><span id="tDur">0:00</span></div>
+    <div class="transport">
+      <button class="icon" id="back" title="Back 10 s (←)" aria-label="Back 10 seconds">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round"><path d="M11 17l-5-5 5-5"/><path d="M18 17l-5-5 5-5"/></svg>
+      </button>
+      <button class="icon big" id="play" title="Play / pause (space)" aria-label="Play">
+        <svg id="playIcon" width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5l12 7-12 7z"/></svg>
+      </button>
+      <button class="icon" id="fwd" title="Forward 10 s (→)" aria-label="Forward 10 seconds">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round"><path d="M13 17l5-5-5-5"/><path d="M6 17l5-5-5-5"/></svg>
+      </button>
+      <div class="speeds" id="speeds"></div>
+    </div>
+    <div class="hint">
+      <kbd>space</kbd> play · <kbd>←</kbd><kbd>→</kbd> 10 s · <kbd>⌘</kbd><kbd>↵</kbd> read ·
+      <a id="dl" download="mdspeak.wav">download wav</a>
+    </div>
+  </section>
+</main>
+
+<audio id="au" preload="auto"></audio>
+
+<script>
+const $ = s => document.querySelector(s);
+const md=$('#md'), engineSel=$('#engine'), emoSel=$('#emotion'), emoWrap=$('#emoWrap'),
+      voiceSel=$('#voice'), voiceWrap=$('#voiceWrap'),
+      readCode=$('#readCode'), speakBtn=$('#speak'), cancelBtn=$('#cancel'),
+      statusEl=$('#status'), progWrap=$('#progWrap'), prog=$('#prog'),
+      spoken=$('#spoken'), leakBadge=$('#leakBadge'), prevWrap=$('#prevWrap'),
+      player=$('#player'), au=$('#au'), fill=$('#fill'), knob=$('#knob'), scrub=$('#scrub'),
+      tCur=$('#tCur'), tDur=$('#tDur'), playBtn=$('#play'), playIcon=$('#playIcon'),
+      speeds=$('#speeds'), dl=$('#dl');
+
+let jobId=null, poll=null, engines=[];
+
+const fmt = s => (!isFinite(s)||s<0) ? '0:00'
+  : Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0');
+
+// ---------------------------------------------------------------- setup
+(async () => {
+  const r = await (await fetch('/api/engines')).json();
+  engines = r.engines;
+  engineSel.innerHTML = engines.map(e =>
+    `<option value="${e.key}" ${e.available?'':'disabled'}>${e.label} — ${e.note}${e.available?'':' (unavailable)'}</option>`
+  ).join('');
+  const first = engines.find(e => e.available);
+  if (first) engineSel.value = first.key; else {
+    statusEl.innerHTML = '<span class="warn">No local MLX voice found on disk.</span>';
+    speakBtn.disabled = true;
+  }
+  emoSel.innerHTML = r.emotions.map(e=>`<option value="${e}">${e}</option>`).join('');
+  voiceSel.innerHTML = r.kokoroVoices.map(v=>`<option value="${v.id}">${v.label}</option>`).join('');
+  syncEngine();
+})();
+
+// Each engine exposes only the controls it actually has: Kokoro has named
+// voices, IndexTTS-2 has emotions, Marvis has neither.
+function syncEngine(){
+  voiceWrap.hidden = engineSel.value !== 'kokoro';
+  emoWrap.hidden   = engineSel.value !== 'indextts2';
+}
+engineSel.addEventListener('change', syncEngine);
+
+[0.75,1,1.25,1.5,1.75,2].forEach(v=>{
+  const b=document.createElement('button');
+  b.textContent = (v===1?'1':String(v))+'×';
+  b.setAttribute('aria-pressed', v===1);
+  b.onclick=()=>{ au.playbackRate=v; [...speeds.children].forEach(c=>c.setAttribute('aria-pressed', c===b)); };
+  speeds.appendChild(b);
+});
+
+// ---------------------------------------------------------------- preview
+let pTimer=null;
+const preview = async () => {
+  const markdown = md.value;
+  if (!markdown.trim()){ spoken.textContent=''; leakBadge.textContent='—'; leakBadge.className='badge'; return; }
+  const r = await (await fetch('/api/preview',{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({markdown, read_code:readCode.checked})})).json();
+  spoken.textContent = r.text;
+  if (r.leaks.length){ leakBadge.textContent='syntax leaked: '+r.leaks.join(' '); leakBadge.className='badge bad'; prevWrap.open=true; }
+  else { leakBadge.textContent='clean · '+r.chunks+(r.chunks===1?' chunk':' chunks'); leakBadge.className='badge ok'; }
+};
+md.addEventListener('input', ()=>{ clearTimeout(pTimer); pTimer=setTimeout(preview,180); });
+readCode.addEventListener('change', preview);
+
+// ---------------------------------------------------------------- synth
+speakBtn.onclick = async () => {
+  if (!md.value.trim()) { md.focus(); return; }
+  speakBtn.disabled=true; cancelBtn.hidden=false; player.classList.remove('on');
+  progWrap.hidden=false; prog.style.width='0%'; statusEl.textContent='Warming up the model…';
+  const res = await fetch('/api/speak',{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({markdown:md.value, engine:engineSel.value, emotion:emoSel.value,
+                         voice:engineSel.value==='kokoro'?voiceSel.value:'', read_code:readCode.checked})});
+  if(!res.ok){ const e=await res.json().catch(()=>({detail:'failed'}));
+    statusEl.innerHTML='<span class="warn">'+e.detail+'</span>'; reset(); return; }
+  const {id,chunks} = await res.json();
+  jobId=id;
+  poll = setInterval(async () => {
+    const j = await (await fetch('/api/job/'+id)).json();
+    prog.style.width = (100*j.done/Math.max(j.total,1))+'%';
+    if (j.state==='running'){ statusEl.textContent=`Reading… chunk ${j.done+1} of ${j.total}`; return; }
+    clearInterval(poll);
+    if (j.state==='ready'){
+      statusEl.textContent = `${fmt(j.duration)} of audio, ${j.total} ${j.total===1?'chunk':'chunks'}.`;
+      au.src='/api/audio/'+id+'.wav?t='+Date.now(); dl.href=au.src;
+      player.classList.add('on'); au.play().catch(()=>{});
+    } else if (j.state==='cancelled'){ statusEl.textContent='Stopped.'; }
+    else { statusEl.innerHTML='<span class="warn">'+(j.error||'failed')+'</span>'; }
+    reset();
+  }, 500);
+};
+
+cancelBtn.onclick = () => { if(jobId) fetch('/api/job/'+jobId+'/cancel',{method:'POST'}); };
+function reset(){ speakBtn.disabled=false; cancelBtn.hidden=true; progWrap.hidden=true; }
+
+// ---------------------------------------------------------------- player
+const setPlayIcon = playing => playIcon.innerHTML = playing
+  ? '<rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/>'
+  : '<path d="M8 5l12 7-12 7z"/>';
+au.onplay  = ()=>{ setPlayIcon(true);  playBtn.setAttribute('aria-label','Pause'); };
+au.onpause = ()=>{ setPlayIcon(false); playBtn.setAttribute('aria-label','Play'); };
+playBtn.onclick = ()=> au.paused ? au.play() : au.pause();
+$('#back').onclick = ()=> au.currentTime = Math.max(0, au.currentTime-10);
+$('#fwd').onclick  = ()=> au.currentTime = Math.min(au.duration||0, au.currentTime+10);
+
+au.ontimeupdate = au.onloadedmetadata = () => {
+  const pct = au.duration ? 100*au.currentTime/au.duration : 0;
+  fill.style.width = pct+'%'; knob.style.left = pct+'%';
+  tCur.textContent = fmt(au.currentTime); tDur.textContent = fmt(au.duration);
+  scrub.setAttribute('aria-valuenow', Math.round(pct));
+};
+
+const seekTo = e => {
+  const r = scrub.getBoundingClientRect();
+  const p = Math.min(1, Math.max(0, (e.clientX-r.left)/r.width));
+  if (au.duration) au.currentTime = p*au.duration;
+};
+let dragging=false;
+scrub.addEventListener('pointerdown', e=>{ dragging=true; scrub.setPointerCapture(e.pointerId); seekTo(e); });
+scrub.addEventListener('pointermove', e=>{ if(dragging) seekTo(e); });
+scrub.addEventListener('pointerup',   ()=>{ dragging=false; });
+scrub.addEventListener('keydown', e=>{
+  const step = e.key==='ArrowLeft' ? -5 : e.key==='ArrowRight' ? 5 : 0;
+  if (step){ e.preventDefault(); au.currentTime = Math.min(au.duration||0, Math.max(0, au.currentTime+step)); }
+});
+
+document.addEventListener('keydown', e => {
+  const typing = e.target===md;
+  if ((e.metaKey||e.ctrlKey) && e.key==='Enter'){ e.preventDefault(); speakBtn.click(); return; }
+  if (typing || !au.src) return;
+  if (e.code==='Space'){ e.preventDefault(); playBtn.click(); }
+  if (e.key==='ArrowLeft'){ e.preventDefault(); $('#back').click(); }
+  if (e.key==='ArrowRight'){ e.preventDefault(); $('#fwd').click(); }
+});
+setPlayIcon(false);
+md.focus();
+</script>
+</body>
+</html>
