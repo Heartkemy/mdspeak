@@ -17,6 +17,7 @@ packages = ["mdspeak"]
 
 [project.scripts]
 mdspeak = "mdspeak.__main__:main"
+mdspeak-speak = "mdspeak.speak:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "httpx>=0.27"]
