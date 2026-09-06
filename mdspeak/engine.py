@@ -26,6 +26,10 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
+# Canonical pause-widening module (vendored into read-aloud as
+# `python/breathe.py`). Re-exported so server.py and tests use one name.
+from mdspeak.breathe import CALM_PAUSE, DEFAULT_PAUSE, breathe
+
 MLX_AUDIO_PY = Path("/Users/rafaelhorvat/tools/mlx-audio/repo/.venv/bin/python")
 INDEXTTS_BIN = Path("/Users/rafaelhorvat/__code__/mlx-indextts/.venv/bin/mlx-indextts")
 MARVIS_REPO = "Marvis-AI/marvis-tts-100m-v0.2-MLX-6bit"
@@ -48,6 +52,7 @@ INDEXTTS_EMOTIONS = [
 # what picks the grapheme-to-phoneme front-end, see `_kokoro_lang`.
 KOKORO_VOICES = [
     ("bm_fable", "Fable — British male, warm"),
+    ("bm_lewis", "Lewis — British male, the voice chosen for agent output"),
     ("bm_george", "George — British male, low and steady"),
     ("bm_daniel", "Daniel — British male, soft-spoken"),
     ("am_michael", "Michael — American male, gentle"),
@@ -81,6 +86,9 @@ class Engine:
     # document — more than the synthesis. Engines without this still go chunk by
     # chunk, which is also what keeps their progress bar meaningful.
     batches: bool = False
+    # Offered in the engine dropdown. Backend-only engines (marvis, indextts2)
+    # stay callable via /api/speak but are not suggested to the user.
+    suggested: bool = True
 
 
 def _has_misaki() -> bool:
@@ -121,6 +129,7 @@ def engines() -> list[Engine]:
             note="fast — about real time",
             available=MLX_AUDIO_PY.exists(),
             detail=MARVIS_REPO,
+            suggested=False,
         ),
         Engine(
             key="indextts2",
@@ -128,6 +137,7 @@ def engines() -> list[Engine]:
             note="better voice — about 6x slower than real time",
             available=bool(snap) and INDEXTTS_BIN.exists() and INDEXTTS_REF.exists(),
             detail=str(snap or "not on disk"),
+            suggested=False,
         ),
     ]
 
@@ -278,6 +288,9 @@ def _indextts_speaker(snap: Path) -> Path:
 
 
 # ---------------------------------------------------------------- joining
+
+# Breathing room (DEFAULT_PAUSE / CALM_PAUSE / breathe) lives in
+# `mdspeak.breathe` — see its docstring. Applied in server._work after joining.
 
 def join_wavs(parts: list[Path], dest: Path) -> Path:
     """Concatenate same-format wavs. stdlib `wave` — no resampling needed."""

@@ -46,6 +46,7 @@ class SpeakIn(BaseModel):
     emotion: str = ""
     voice: str = ""
     read_code: bool = False
+    calm: bool = False  # slower default + heavier pauses for dense text
 
 
 class PreviewIn(BaseModel):
@@ -119,6 +120,9 @@ def _work(job: Job, chunks: list[str], body: SpeakIn) -> None:
             job.done = i + 1
         final = out_dir / "audio.wav"
         engine.join_wavs(parts, final)
+        # Breathing room: widen the natural pauses already in the audio. Every
+        # read gets a gentle gap so dense text is followable; Calm asks for more.
+        engine.breathe(final, engine.CALM_PAUSE if body.calm else engine.DEFAULT_PAUSE)
         job.duration = engine.wav_duration(final)
         job.state = "ready"
     except Exception as exc:  # surfaced to the page, not swallowed

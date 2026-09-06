@@ -59,6 +59,7 @@ def test_index_serves_the_page():
     assert "<title>mdspeak</title>" in html
     assert "playbackRate" in html  # speed control
     assert 'id="scrub"' in html  # seek control
+    assert 'id="calm"' in html  # calm mode toggle
 
 
 # ---------------------------------------------------------------- chunking
@@ -116,6 +117,98 @@ def test_join_wavs_rejects_mismatched_rates(tmp_path):
 def test_join_wavs_needs_input(tmp_path):
     with pytest.raises(engine.SynthError):
         engine.join_wavs([], tmp_path / "o.wav")
+
+
+# ---------------------------------------------------------------- breathing room
+
+def _tone(seconds, rate=24000):
+    """A 440 Hz sine burst — speech stand-in with no internal silence."""
+    import array
+    import math
+
+    a = array.array("h")
+    for i in range(int(rate * seconds)):
+        a.append(int(12000 * math.sin(2 * math.pi * 440 * i / rate)))
+    return a
+
+
+def _quiet(seconds, rate=24000):
+    import array
+
+    return array.array("h", b"\x00\x00") * int(rate * seconds)
+
+
+def _write_wav(path, segments, rate=24000):
+    import array
+
+    flat = array.array("h")
+    for s in segments:
+        flat.extend(s)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(flat.tobytes())
+    return path
+
+
+def test_breathe_lengthens_only_internal_pauses(tmp_path):
+    rate = 24000
+    src = _write_wav(tmp_path / "src.wav", [_quiet(0.05), _tone(0.15), _quiet(0.2), _tone(0.15), _quiet(0.1)])
+
+    engine.breathe(src, 0.4)
+
+    # The 0.2 s internal gap grows to 0.6 s; lead/trail silence stays put.
+    assert engine.wav_duration(src) == pytest.approx(0.05 + 0.15 + 0.6 + 0.15 + 0.1, abs=0.005)
+    import array
+
+    with wave.open(str(src), "rb") as w:
+        frames = array.array("h", w.readframes(w.getnframes()))
+    assert frames[: int(0.05 * rate)] == _quiet(0.05)
+    assert max(abs(s) for s in frames) > 5000  # the tone survived the rewrite
+
+
+def test_breathe_leaves_micro_and_boundary_silence(tmp_path):
+    rate = 24000
+    src = _write_wav(tmp_path / "micro.wav", [_tone(0.15), _quiet(0.02), _tone(0.15), _quiet(0.3)])
+
+    before = engine.wav_duration(src)
+    engine.breathe(src, 0.4)
+
+    # 0.02 s is a consonant closure, 0.3 s trailing is boundary: neither grows.
+    assert engine.wav_duration(src) == pytest.approx(before, abs=0.005)
+
+
+def test_breathe_leaves_clause_commas_alone(tmp_path):
+    """Real TTS output carries 30–100 ms gaps that are word/comma breaks, not
+    sentence ends — widening them is what makes the voice sound cut off."""
+    src = _write_wav(tmp_path / "clause.wav", [_tone(0.15), _quiet(0.1), _tone(0.15)])
+    before = engine.wav_duration(src)
+
+    engine.breathe(src, engine.CALM_PAUSE)
+
+    assert engine.wav_duration(src) == pytest.approx(before, abs=0.005)
+
+
+def test_breathe_caps_the_widened_gap(tmp_path):
+    """Flat extra seconds on an already-long pause make a near-second hole.
+    The widened gap is capped so quiet stays quiet, not robotic."""
+    src = _write_wav(tmp_path / "cap.wav", [_tone(0.15), _quiet(0.6), _tone(0.15)])
+
+    engine.breathe(src, engine.CALM_PAUSE)
+
+    # 0.6 s natural + 0.6 s extra would be 1.2 s; the cap holds it at ~0.7 s.
+    assert engine.wav_duration(src) == pytest.approx(0.15 + 0.7 + 0.15, abs=0.005)
+
+
+def test_breathe_is_a_noop_with_zero_extra_and_silent_files(tmp_path):
+    src = _write_wav(tmp_path / "z.wav", [_tone(0.1)])
+    engine.breathe(src, 0.0)
+    assert engine.wav_duration(src) == pytest.approx(0.1, abs=0.005)
+
+    quiet = _write_wav(tmp_path / "quiet.wav", [_quiet(0.2)])
+    engine.breathe(quiet, 0.4)
+    assert engine.wav_duration(quiet) == pytest.approx(0.2, abs=0.005)
 
 
 # ---------------------------------------------------------------- end to end

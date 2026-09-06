@@ -306,6 +306,8 @@
         <select id="emotion"></select>
       </label>
       <label class="check"><input type="checkbox" id="readCode"> read code aloud</label>
+      <label class="check" title="Slower default speed and longer pauses between sentences — for dense, information-heavy text.">
+        <input type="checkbox" id="calm"> calm</label>
     </div>
     <div class="row">
       <button class="ghost" id="cancel" hidden>Stop</button>
@@ -349,7 +351,7 @@
 const $ = s => document.querySelector(s);
 const md=$('#md'), engineSel=$('#engine'), emoSel=$('#emotion'), emoWrap=$('#emoWrap'),
       voiceSel=$('#voice'), voiceWrap=$('#voiceWrap'),
-      readCode=$('#readCode'), speakBtn=$('#speak'), cancelBtn=$('#cancel'),
+      readCode=$('#readCode'), calm=$('#calm'), speakBtn=$('#speak'), cancelBtn=$('#cancel'),
       statusEl=$('#status'), progWrap=$('#progWrap'), prog=$('#prog'),
       spoken=$('#spoken'), leakBadge=$('#leakBadge'), prevWrap=$('#prevWrap'),
       player=$('#player'), au=$('#au'), fill=$('#fill'), knob=$('#knob'), scrub=$('#scrub'),
@@ -358,13 +360,18 @@ const md=$('#md'), engineSel=$('#engine'), emoSel=$('#emotion'), emoWrap=$('#emo
 
 let jobId=null, poll=null, engines=[];
 
+// Slower side is finer-grained than the fast side: dense text needs gentle
+// steps down from 1, going fast is already one jump away.
+const RATES=[0.8, 0.9, 1, 1.25, 1.5, 1.75, 2];
+const CALM_RATE=0.8;
+
 const fmt = s => (!isFinite(s)||s<0) ? '0:00'
   : Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0');
 
 // ---------------------------------------------------------------- setup
 (async () => {
   const r = await (await fetch('/api/engines')).json();
-  engines = r.engines;
+  engines = r.engines.filter(e => e.suggested !== false);
   engineSel.innerHTML = engines.map(e =>
     `<option value="${e.key}" ${e.available?'':'disabled'}>${e.label} — ${e.note}${e.available?'':' (unavailable)'}</option>`
   ).join('');
@@ -386,13 +393,28 @@ function syncEngine(){
 }
 engineSel.addEventListener('change', syncEngine);
 
-[0.75,1,1.25,1.5,1.75,2].forEach(v=>{
-  const b=document.createElement('button');
-  b.textContent = (v===1?'1':String(v))+'×';
-  b.setAttribute('aria-pressed', v===1);
-  b.onclick=()=>{ au.playbackRate=v; [...speeds.children].forEach(c=>c.setAttribute('aria-pressed', c===b)); };
+const setSpeed = v => {
+  au.playbackRate = v;
+  [...speeds.children].forEach(c => c.setAttribute('aria-pressed', c.dataset.rate === String(v)));
+  localStorage.setItem('mdspeak.rate', String(v));
+};
+RATES.forEach(v => {
+  const b = document.createElement('button');
+  b.dataset.rate = v;
+  b.textContent = (v === 1 ? '1' : String(v)) + '×';
+  b.setAttribute('aria-pressed', false);
+  b.onclick = () => setSpeed(v);
   speeds.appendChild(b);
 });
+calm.addEventListener('change', () => {
+  localStorage.setItem('mdspeak.calm', calm.checked ? '1' : '0');
+  if (calm.checked) setSpeed(CALM_RATE);
+});
+// Restore last session's pace — calm pins the default, otherwise last rate.
+const savedCalm = localStorage.getItem('mdspeak.calm') === '1';
+const savedRate = parseFloat(localStorage.getItem('mdspeak.rate'));
+calm.checked = savedCalm;
+setSpeed(savedCalm ? CALM_RATE : (RATES.includes(savedRate) ? savedRate : 1));
 
 // ---------------------------------------------------------------- preview
 let pTimer=null;
@@ -415,7 +437,8 @@ speakBtn.onclick = async () => {
   progWrap.hidden=false; prog.style.width='0%'; statusEl.textContent='Warming up the model…';
   const res = await fetch('/api/speak',{method:'POST',headers:{'content-type':'application/json'},
     body:JSON.stringify({markdown:md.value, engine:engineSel.value, emotion:emoSel.value,
-                         voice:engineSel.value==='kokoro'?voiceSel.value:'', read_code:readCode.checked})});
+                         voice:engineSel.value==='kokoro'?voiceSel.value:'', read_code:readCode.checked,
+                         calm:calm.checked})});
   if(!res.ok){ const e=await res.json().catch(()=>({detail:'failed'}));
     statusEl.innerHTML='<span class="warn">'+e.detail+'</span>'; reset(); return; }
   const {id,chunks} = await res.json();
