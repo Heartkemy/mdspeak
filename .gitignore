@@ -9,6 +9,7 @@ build/
 # Tooling caches
 .pytest_cache/
 .ruff_cache/
+.build/
 
 # Working notes for prompt-driven sessions, not part of the package
 .prompt-enginearing/
