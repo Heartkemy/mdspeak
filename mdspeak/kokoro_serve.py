@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """Model-resident Kokoro generator for the Speak Selection worker.
 
-Run under the `mlx-audio` venv's python (see ``mdspeak.engine.MLX_AUDIO_PY``),
-which is the only venv that can import ``mlx_audio``. This process loads the
-Kokoro model exactly once and then renders text to WAV on request, which is what
-makes a hotkey feature usable: a one-shot ``mlx_audio.tts.generate`` call pays a
-~5 s model load per selection, so the long-lived worker spawns *this* instead
-and holds it warm.
+Run under the interpreter discovered from ``mlx_audio.tts.generate`` (or set
+``MDSPEAK_MLX_AUDIO_PYTHON``); it is the runtime that can import
+``mlx_audio``. This process loads the Kokoro model once and renders text to WAV
+on request, so the long-lived worker avoids a model load for every selection.
 
 Protocol: one JSON object per line on stdin, one per line on stdout.
 
-Request:  {"id": "abc", "text": "...", "out": "/abs/out.wav", "voice": "bm_lewis", "speed": 1.0}
+Request:  {"id": "abc", "text": "...", "out": "/abs/out.wav", "voice": "bm_fable", "speed": 1.0}
 Response: {"id": "abc", "ok": true, "path": "/abs/out.wav", "seconds": 1.2}
           {"id": "abc", "ok": false, "error": "..."}
 
