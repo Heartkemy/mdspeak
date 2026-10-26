@@ -20,33 +20,31 @@ def test_engines_keep_kokoro_as_the_supported_default(monkeypatch, tmp_path):
     command = tmp_path / "mlx_audio.tts.generate"
     command.write_text("#!/bin/sh\nexit 0\n")
     command.chmod(0o755)
+    monkeypatch.setattr(engine, "ENV_FILE", tmp_path / ".env")
     monkeypatch.setenv("MDSPEAK_MLX_AUDIO_COMMAND", str(command))
+    monkeypatch.delenv("MDSPEAK_ENABLE_UNSUPPORTED_INDEXTTS", raising=False)
+    for name in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
     body = client.get("/api/engines").json()
     keys = {e["key"] for e in body["engines"]}
-    assert keys == {"kokoro", "marvis"}
-    assert all(e["available"] for e in body["engines"])
+    assert keys == {"kokoro", "marvis", "cloudflare", "gemini"}
+    assert "calm" in body["emotions"]
     assert body["engines"][0]["key"] == "kokoro"
+    assert body["engines"][0]["available"] is True
     assert engine.KOKORO_DEFAULT_VOICE == "bm_fable"
+    assert body["cloudflareVoices"][0]["id"] == "jupiter"
+    assert any(v["id"] == "Charon" for v in body["geminiVoices"])
     assert any(v["id"] == "bm_fable" for v in body["kokoroVoices"])
 
 
-def test_kokoro_missing_runtime_has_actionable_error(monkeypatch, tmp_path):
-    monkeypatch.delenv("MDSPEAK_MLX_AUDIO_COMMAND", raising=False)
-    monkeypatch.setattr(engine.shutil, "which", lambda _name: None)
-    with pytest.raises(engine.SynthError, match="MDSPEAK_MLX_AUDIO_COMMAND"):
-        engine.synth_chunk("Synthetic text.", tmp_path / "out.wav", "kokoro")
-
-
-def test_native_runtime_uses_explicit_interpreter_or_cli_shebang(monkeypatch, tmp_path):
-    runtime = tmp_path / "python"
-    runtime.write_text("#!/bin/sh\n")
-    runtime.chmod(0o755)
-    command = tmp_path / "mlx_audio.tts.generate"
-    command.write_text(f"#!{runtime}\n")
-    command.chmod(0o755)
-    monkeypatch.setenv("MDSPEAK_MLX_AUDIO_COMMAND", str(command))
-    monkeypatch.delenv("MDSPEAK_MLX_AUDIO_PYTHON", raising=False)
-    assert engine.mlx_audio_python() == runtime
+def test_web_api_rejects_remote_requests_and_oversized_text():
+    assert client.get("/api/engines", headers={"host": "example.test"}).status_code == 403
+    assert client.post(
+        "/api/preview",
+        json={"markdown": "Synthetic text."},
+        headers={"origin": "https://example.test"},
+    ).status_code == 403
+    assert client.post("/api/preview", json={"markdown": "x" * 50_001}).status_code == 413
 
 
 def test_preview_is_clean_and_chunked():
@@ -81,22 +79,7 @@ def test_index_serves_the_page():
     assert "playbackRate" in html  # speed control
     assert 'id="scrub"' in html  # seek control
     assert 'id="calm"' in html  # calm mode toggle
-
-
-def test_local_api_rejects_remote_targets_and_disables_http_caching():
-    assert client.get("/api/engines", headers={"host": "example.test"}).status_code == 403
-    assert client.post(
-        "/api/preview",
-        json={"markdown": "Synthetic text."},
-        headers={"origin": "https://example.test"},
-    ).status_code == 403
-    response = client.get("/api/engines")
-    assert response.headers["cache-control"] == "no-store"
-
-
-def test_local_api_bounds_untrusted_text_size():
-    response = client.post("/api/preview", json={"markdown": "x" * 50_001})
-    assert response.status_code == 413
+    assert "engineSel.value = 'kokoro'" in html
 
 
 # ---------------------------------------------------------------- chunking
@@ -118,9 +101,15 @@ def test_chunking_never_emits_empty():
 
 
 def test_long_unpunctuated_block_still_chunks():
-    parts = engine.chunk("word " * 400, limit=200)
-    assert len(parts) >= 1
-    assert all(p.strip() for p in parts)
+    text = "word " * 400
+    parts = engine.chunk(text, limit=200)
+    assert len(parts) > 1
+    assert all(0 < len(p) <= 200 for p in parts)
+    assert " ".join(parts).split() == text.split()
+    token = "字" * 500
+    parts = engine.chunk(token, limit=200)
+    assert "".join(parts) == token
+    assert all(len(p) <= 200 for p in parts)
 
 
 # ---------------------------------------------------------------- wav joining

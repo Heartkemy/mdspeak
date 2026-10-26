@@ -85,6 +85,29 @@ No portable performance claim is made here. Latency, memory use, model download
 time, and audio quality depend on your hardware, MLX-Audio release, model, and
 input. The automated suite uses synthetic text and never loads a neural model.
 
+### Optional cloud engines
+
+Cloudflare Aura 2 and Gemini speech are optional alternatives in the web and
+native clients. Kokoro remains the local default. Selecting a cloud provider
+sends normalized text to that provider; each client labels that choice.
+Configure credentials in an ignored repository-root `.env` when running from
+this checkout, or use environment variables with an installed package:
+
+~~~dotenv
+CLOUDFLARE_API_TOKEN=your-workers-ai-token
+CLOUDFLARE_ACCOUNT_ID=your-account-id
+# or GEMINI_API_KEY=your-api-key
+~~~
+
+These optional paths have mocked request/WAV and cancellation tests; live model
+access, quotas and cloud audio quality have not been verified. Use private text
+only when you accept the provider's terms and data handling. See the official
+[Gemini speech API](https://ai.google.dev/gemini-api/docs/speech-generation)
+and [Cloudflare Aura model](https://developers.cloudflare.com/workers-ai/models/aura-2-en/)
+contracts. Their model, account, quota and API terms are separate from this
+repository's MIT license. Stopping playback prevents later synthesis chunks;
+a provider request already in progress may finish.
+
 ## Development
 
 ~~~sh

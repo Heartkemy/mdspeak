@@ -1,13 +1,39 @@
 import Foundation
 
-/// User-facing settings, persisted in UserDefaults. The defaults use the
-/// built-in Kokoro voice bm_fable, 1× speed, and calm off.
+enum SpeechEngine: String, CaseIterable {
+    case cloudflare, gemini, kokoro
+
+    var label: String {
+        switch self {
+        case .cloudflare: return "Cloudflare Aura 2 (sends text)"
+        case .gemini: return "Gemini (sends text to Google)"
+        case .kokoro: return "Kokoro (local)"
+        }
+    }
+
+    var voiceKey: String { self == .kokoro ? "voice" : "\(rawValue)Voice" }
+
+    var defaultVoice: String {
+        switch self {
+        case .cloudflare: return "jupiter"
+        case .gemini: return "Charon"
+        case .kokoro: return "bm_fable"
+        }
+    }
+}
+
+/// User-facing settings, persisted in UserDefaults. Keep each provider's voice separate.
 enum AppSettings {
     private static let defaults = UserDefaults.standard
 
+    static var engine: SpeechEngine {
+        get { SpeechEngine(rawValue: defaults.string(forKey: "engine") ?? "") ?? .kokoro }
+        set { defaults.set(newValue.rawValue, forKey: "engine") }
+    }
+
     static var voice: String {
-        get { defaults.string(forKey: "voice") ?? "bm_fable" }
-        set { defaults.set(newValue, forKey: "voice") }
+        get { defaults.string(forKey: engine.voiceKey) ?? engine.defaultVoice }
+        set { defaults.set(newValue, forKey: engine.voiceKey) }
     }
 
     static var speed: Double {

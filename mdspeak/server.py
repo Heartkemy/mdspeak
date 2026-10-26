@@ -1,4 +1,4 @@
-"""mdspeak — paste markdown, hear it read back. Local MLX models only.
+"""mdspeak — paste markdown, hear it read back with local MLX or optional cloud engines.
 
 One process: a small HTTP API plus one static page. Synthesis runs on a worker
 thread per job so the page can poll progress; there is no queue and no database
@@ -71,6 +71,8 @@ def api_engines() -> dict:
         "engines": [e.__dict__ for e in engine.engines()],
         "emotions": engine.INDEXTTS_EMOTIONS,
         "kokoroVoices": [{"id": v, "label": lbl} for v, lbl in engine.KOKORO_VOICES],
+        "geminiVoices": [{"id": v, "label": lbl} for v, lbl in engine.GEMINI_VOICES],
+        "cloudflareVoices": [{"id": v, "label": lbl} for v, lbl in engine.CLOUDFLARE_VOICES],
     }
 
 
@@ -113,7 +115,7 @@ def api_speak(body: SpeakIn) -> dict:
 
 def _work(job: Job, chunks: list[str], body: SpeakIn) -> None:
     out_dir = JOBS_DIR / job.id
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     parts: list[Path] = []
     try:
         for i, piece in enumerate(chunks):
@@ -124,6 +126,9 @@ def _work(job: Job, chunks: list[str], body: SpeakIn) -> None:
             engine.synth_chunk(
                 piece, part, body.engine, voice=body.voice, emotion=body.emotion
             )
+            if job.cancel.is_set():
+                job.state = "cancelled"
+                return
             parts.append(part)
             job.done = i + 1
         final = out_dir / "audio.wav"
@@ -164,6 +169,9 @@ def api_cancel(job_id: str) -> dict:
 
 @app.get("/api/audio/{job_id}.wav")
 def api_audio(job_id: str) -> FileResponse:
+    job = JOBS.get(job_id)
+    if job is None or job.state != "ready":
+        raise HTTPException(404, "not ready")
     path = JOBS_DIR / job_id / "audio.wav"
     if not path.exists():
         raise HTTPException(404, "not ready")

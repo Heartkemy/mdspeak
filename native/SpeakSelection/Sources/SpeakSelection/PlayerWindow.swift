@@ -21,19 +21,21 @@ final class PlayerWindow: NSWindowController {
     private var currentLabel: NSTextField!
     private var durationLabel: NSTextField!
     private var playPauseButton: NSButton!
+    private var enginePopup: NSPopUpButton!
     private var voicePopup: NSPopUpButton!
     private var speedSlider: NSSlider!
     private var speedLabel: NSTextField!
     private var calmCheckbox: NSButton!
+    private var voicesRequest = 0
 
     private static let sideInset: CGFloat = 26
-    private static let labelWidth: CGFloat = 48
+    private static let labelWidth: CGFloat = 58
 
     init(worker: Worker, player: Player) {
         self.worker = worker
         self.player = player
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 300),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 350),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -95,10 +97,22 @@ final class PlayerWindow: NSWindowController {
         let separator = NSBox()
         separator.boxType = .separator
 
+        enginePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        enginePopup.target = self
+        enginePopup.action = #selector(engineChanged)
+        enginePopup.setAccessibilityLabel("Provider")
+        for engine in SpeechEngine.allCases {
+            enginePopup.addItem(withTitle: engine.label)
+            enginePopup.lastItem?.representedObject = engine.rawValue
+            if engine == AppSettings.engine { enginePopup.select(enginePopup.lastItem) }
+        }
+        let engineRow = row(settingTitle("Provider"), enginePopup)
+
         let voiceLabel = settingTitle("Voice")
         voicePopup = NSPopUpButton(frame: .zero, pullsDown: false)
         voicePopup.target = self
         voicePopup.action = #selector(voiceChanged)
+        voicePopup.setAccessibilityLabel("Voice")
         voicePopup.setContentHuggingPriority(.defaultLow, for: .horizontal)
         voicePopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
         let voiceRow = row(voiceLabel, voicePopup)
@@ -120,6 +134,7 @@ final class PlayerWindow: NSWindowController {
         stack.addArrangedSubview(scrubRow)
         stack.addArrangedSubview(transportWrap)
         stack.addArrangedSubview(separator)
+        stack.addArrangedSubview(engineRow)
         stack.addArrangedSubview(voiceRow)
         stack.addArrangedSubview(speedRow)
         stack.addArrangedSubview(calmCheckbox)
@@ -188,7 +203,10 @@ final class PlayerWindow: NSWindowController {
         player.onTick = { [weak self] current, duration in
             DispatchQueue.main.async { self?.updateScrubber(current, duration) }
         }
+        // Keep AppDelegate informed so it cancels the startup watchdog.
+        let onPlayStateChange = player.onPlayStateChange
         player.onPlayStateChange = { [weak self] playing in
+            onPlayStateChange?(playing)
             DispatchQueue.main.async { self?.updatePlayPause(playing) }
         }
     }
@@ -231,12 +249,16 @@ final class PlayerWindow: NSWindowController {
     // ---------------------------------------------------------------- settings actions
 
     private func refreshVoices() {
+        voicesRequest += 1
+        let request = voicesRequest
+        let engine = AppSettings.engine
         let current = AppSettings.voice
+        voicePopup.isEnabled = false
         voicePopup.removeAllItems()
         voicePopup.addItem(withTitle: "Loading…")
-        worker.voices { [weak self] voices in
+        worker.voices(engine: engine) { [weak self] voices in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, request == self.voicesRequest else { return }
                 self.voicePopup.removeAllItems()
                 if voices.isEmpty {
                     self.voicePopup.addItem(withTitle: current)
@@ -245,10 +267,19 @@ final class PlayerWindow: NSWindowController {
                         self.voicePopup.addItem(withTitle: v.label)
                         self.voicePopup.lastItem?.representedObject = v.id
                     }
+                    self.voicePopup.isEnabled = true
                     self.selectVoice(current)
+                    self.voiceChanged()
                 }
             }
         }
+    }
+
+    @objc private func engineChanged() {
+        guard let id = enginePopup.selectedItem?.representedObject as? String,
+              let engine = SpeechEngine(rawValue: id) else { return }
+        AppSettings.engine = engine
+        refreshVoices()
     }
 
     private func selectVoice(_ id: String) {

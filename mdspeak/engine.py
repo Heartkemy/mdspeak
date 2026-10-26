@@ -1,19 +1,27 @@
-"""TTS engines discovered from a user's local MLX-Audio installation.
+"""Local MLX synthesis, with optional separately configured cloud engines.
 
 Kokoro is the supported local baseline.  The application deliberately does not
-bundle a Python interpreter, model weights, or a reference voice: those belong
-to the user's separately installed runtime and remain governed by their
-upstream terms.
+bundle a Python interpreter, model weights, a reference voice, or cloud
+credentials: those belong to separately installed/configured services and
+remain governed by their upstream terms.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import glob
+import io
+import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import tempfile
+import textwrap
+import urllib.error
+import urllib.request
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +48,7 @@ INDEXTTS_EMOTIONS = [
 # what picks the grapheme-to-phoneme front-end, see `_kokoro_lang`.
 KOKORO_VOICES = [
     ("bm_fable", "Fable — British male, warm"),
-    ("bm_lewis", "Lewis — British male, the voice chosen for agent output"),
+    ("bm_lewis", "Lewis — British male"),
     ("bm_george", "George — British male, low and steady"),
     ("bm_daniel", "Daniel — British male, soft-spoken"),
     ("am_michael", "Michael — American male, gentle"),
@@ -50,6 +58,51 @@ KOKORO_VOICES = [
     ("bf_emma", "Emma — British female, calm"),
 ]
 KOKORO_DEFAULT_VOICE = "bm_fable"
+
+GEMINI_MODEL = "gemini-3.8-flash-tts"
+GEMINI_DEFAULT_VOICE = "Charon"
+GEMINI_VOICES = [
+    ("Charon", "Charon — informative"),
+    ("Kore", "Kore — firm"),
+    ("Sulafat", "Sulafat — warm"),
+    ("Achernar", "Achernar — soft"),
+    ("Puck", "Puck — upbeat"),
+]
+CLOUDFLARE_MODEL = "@cf/deepgram/aura-2-en"
+CLOUDFLARE_DEFAULT_VOICE = "jupiter"
+CLOUDFLARE_VOICES = [(v, v.capitalize()) for v in ("jupiter", "luna", "orion", "athena", "zeus", "apollo")]
+ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+
+def _env(*names: str) -> str:
+    """Read only named settings, independent of the launcher's cwd or shell."""
+    for name in names:
+        if value := os.environ.get(name, "").strip():
+            return value
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            name, sep, value = line.strip().removeprefix("export ").partition("=")
+            if sep and name.strip() in names:
+                try:
+                    values = shlex.split(value, comments=True)
+                except ValueError:
+                    raise SynthError(f"Invalid {name.strip()} entry in .env") from None
+                if values:
+                    return values[0]
+    return ""
+
+
+def gemini_api_key() -> str:
+    return _env("GEMINI_API_KEY", "GOOGLE_API_KEY")
+
+
+def cloudflare_credentials() -> tuple[str, str]:
+    token, account = _env("CLOUDFLARE_API_TOKEN"), _env("CLOUDFLARE_ACCOUNT_ID")
+    if not token or not account:
+        raise SynthError("Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the project .env file")
+    if not re.fullmatch(r"[a-fA-F0-9]{32}", account):
+        raise SynthError("CLOUDFLARE_ACCOUNT_ID must be the 32-character account ID from the dashboard")
+    return token, account
 
 
 def _resolve_executable(value: str) -> Path | None:
@@ -157,7 +210,7 @@ def _indextts_snapshot() -> Path | None:
 
 
 def engines() -> list[Engine]:
-    """Configured engines, without loading a model or downloading any weights."""
+    """Configured engines without loading a model, downloading weights, or probing quota."""
     snap = _indextts_snapshot()
     choices = [
         Engine(
@@ -171,10 +224,24 @@ def engines() -> list[Engine]:
         Engine(
             key="marvis",
             label="Marvis 100M",
-            note="experimental alternative",
+            note="experimental local alternative",
             available=mlx_audio_command() is not None,
             detail=MARVIS_REPO,
             suggested=False,
+        ),
+        Engine(
+            key="cloudflare",
+            label="Cloudflare Aura 2",
+            note="optional cloud speech — text leaves this machine",
+            available=bool(_env("CLOUDFLARE_API_TOKEN") and _env("CLOUDFLARE_ACCOUNT_ID")),
+            detail=CLOUDFLARE_MODEL,
+        ),
+        Engine(
+            key="gemini",
+            label="Gemini 3.8 Flash TTS",
+            note="optional cloud speech — text is sent to Google",
+            available=bool(gemini_api_key()),
+            detail=GEMINI_MODEL,
         ),
     ]
     if _indextts_enabled():
@@ -193,7 +260,7 @@ def engines() -> list[Engine]:
 
 def batches_for(key: str) -> bool:
     """Whether `key` accepts the whole text in one call. See Engine.batches."""
-    return any(e.key == key and e.batches for e in engines())
+    return any(choice.key == key and choice.batches for choice in engines())
 
 
 # ---------------------------------------------------------------- chunking
@@ -211,7 +278,10 @@ def chunk(text: str, limit: int = 350) -> list[str]:
             out.append(block)
             continue
         buf = ""
-        for piece in _sentences(block):
+        # A sentence (or a single long token) can exceed the service input bound.
+        pieces = [part for sentence in _sentences(block)
+                  for part in textwrap.wrap(sentence, limit, break_on_hyphens=False)]
+        for piece in pieces:
             if buf and len(buf) + len(piece) + 1 > limit:
                 out.append(buf.strip())
                 buf = piece
@@ -264,6 +334,10 @@ def _mlx_audio(args: list[str], *, cwd: Path | None = None) -> None:
 def synth_chunk(text: str, dest: Path, engine: str, *, voice: str = "", emotion: str = "") -> Path:
     """Render one chunk to `dest` (a .wav path). Returns dest."""
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if engine == "cloudflare":
+        return _cloudflare(text, dest, voice)
+    if engine == "gemini":
+        return _gemini(text, dest, voice)
     if engine == "kokoro":
         v = voice or KOKORO_DEFAULT_VOICE
         with tempfile.TemporaryDirectory() as td:
@@ -336,6 +410,95 @@ def synth_chunk(text: str, dest: Path, engine: str, *, voice: str = "", emotion:
         return dest
 
     raise SynthError(f"unknown engine {engine!r}")
+
+
+def _cloudflare(text: str, dest: Path, voice: str) -> Path:
+    token, account = cloudflare_credentials()
+    request = urllib.request.Request(
+        f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{CLOUDFLARE_MODEL}",
+        data=json.dumps({"text": text, "speaker": voice or CLOUDFLARE_DEFAULT_VOICE,
+                         "encoding": "linear16", "container": "none", "sample_rate": 24000}).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            if "json" in response.headers.get("Content-Type", "").lower():
+                raise SynthError("Cloudflare Aura returned an error instead of audio")
+            data = response.read()
+    except urllib.error.HTTPError as exc:
+        # Never echo provider responses that might include credentials or input.
+        if exc.code == 429:
+            raise SynthError("Cloudflare Aura quota/rate limit reached (HTTP 429); wait for the allowance to reset") from None
+        raise SynthError(f"Cloudflare Aura failed (HTTP {exc.code}); check token permissions, account ID and Workers AI access") from None
+    except (urllib.error.URLError, TimeoutError):
+        raise SynthError("Cloudflare Aura connection failed or timed out") from None
+    except ValueError:
+        raise SynthError("Cloudflare Aura request or response was invalid") from None
+    if not data or len(data) % 2:
+        raise SynthError("Cloudflare Aura returned empty or incomplete PCM audio")
+    # Aura's streamed WAV uses a placeholder size; wrap raw PCM with a final length.
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+        wav.writeframes(data)
+    return _write_wav(buffer.getvalue(), dest, "Cloudflare Aura")
+
+
+def _gemini(text: str, dest: Path, voice: str) -> Path:
+    """Gemini 3.8 Interactions API returns a complete mono PCM WAV."""
+    key = gemini_api_key()
+    if not key:
+        raise SynthError("Set GEMINI_API_KEY in the project .env file or environment")
+    payload = {
+        "model": GEMINI_MODEL,
+        "input": [{"type": "user_input", "content": [{"type": "text", "text": text}]}],
+        "response_format": {"type": "audio"},
+        "generation_config": {"speech_config": [{"voice": voice or GEMINI_DEFAULT_VOICE}]},
+        "store": False,
+    }
+    request = urllib.request.Request(
+        "https://generativelanguage.googleapis.com/v1beta/interactions",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "x-goog-api-key": key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as exc:
+        # Never surface raw responses/headers, which may echo credentials or input.
+        if exc.code == 429:
+            raise SynthError("Gemini TTS quota exhausted (HTTP 429). Wait for the quota reset or enable a higher API tier.") from None
+        raise SynthError(f"Gemini TTS failed (HTTP {exc.code}); check API key, model access and quota") from None
+    except (urllib.error.URLError, TimeoutError):
+        raise SynthError("Gemini TTS connection failed or timed out") from None
+    except ValueError:
+        raise SynthError("Gemini TTS returned an invalid response") from None
+
+    try:
+        audio = [part for step in result.get("steps", []) if step.get("type") == "model_output"
+                 for part in step.get("content", []) if part.get("type") == "audio"]
+        if not audio:
+            raise SynthError("Gemini TTS returned no audio; the request may have been blocked")
+        data = base64.b64decode(audio[-1]["data"], validate=True)
+    except (AttributeError, KeyError, TypeError, ValueError, binascii.Error):
+        raise SynthError("Gemini TTS returned invalid WAV audio") from None
+    return _write_wav(data, dest, "Gemini TTS")
+
+
+def _write_wav(data: bytes, dest: Path, provider: str) -> Path:
+    """Validate the shared playback/Calm format before publishing cloud audio."""
+    try:
+        with wave.open(io.BytesIO(data), "rb") as wav:
+            if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) != (1, 2, 24000):
+                raise SynthError(f"{provider} returned an unsupported WAV format")
+            if not wav.getnframes() or len(wav.readframes(wav.getnframes())) != wav.getnframes() * 2:
+                raise SynthError(f"{provider} returned empty or incomplete audio")
+    except (wave.Error, EOFError):
+        raise SynthError(f"{provider} returned invalid WAV audio") from None
+    dest.write_bytes(data)
+    return dest
 
 
 _SPEAKER_CACHE = Path.home() / ".cache/mdspeak/indextts2_speaker.npz"

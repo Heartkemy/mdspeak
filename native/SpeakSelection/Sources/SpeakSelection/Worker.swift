@@ -7,7 +7,7 @@ struct SpeakJob {
 
 /// Owns the long-lived `mdspeak-speak` worker: spawns it, waits for it to be
 /// ready, POSTs selected text, and terminates it when the shell quits. The
-/// worker is what holds the Kokoro model warm; this shell just talks HTTP.
+/// worker owns cloud credentials and synthesis; this shell just talks HTTP.
 final class Worker {
     /// A UserDefaults override is intentionally first: it is the escape hatch
     /// for an app launched outside a shell with a configured PATH.
@@ -70,7 +70,7 @@ final class Worker {
         }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: executable)
-        proc.arguments = ["--port", String(port)]
+        proc.arguments = ["--port", String(port), "--engine", AppSettings.engine.rawValue]
         proc.terminationHandler = { [weak self] _ in
             self?.process = nil
         }
@@ -90,18 +90,25 @@ final class Worker {
 
     // ---------------------------------------------------------------- requests
 
+    func cancel(jobId: String) {
+        guard let url = url("/cancel/\(jobId)") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        URLSession.shared.dataTask(with: request).resume()
+    }
+
     private func url(_ path: String) -> URL? {
         URL(string: "http://127.0.0.1:\(port)\(path)")
     }
 
     /// POST text; on success the completion gets the job (id + segment count).
-    func speak(text: String, voice: String, calm: Bool, completion: @escaping (SpeakJob?) -> Void) {
+    func speak(text: String, engine: SpeechEngine, voice: String, calm: Bool, completion: @escaping (SpeakJob?) -> Void) {
         guard let url = url("/speak") else { completion(nil); return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try? JSONSerialization.data(
-            withJSONObject: ["text": text, "voice": voice, "calm": calm]
+            withJSONObject: ["text": text, "engine": engine.rawValue, "voice": voice, "calm": calm]
         )
         request.timeoutInterval = 60
 
@@ -138,8 +145,8 @@ final class Worker {
     }
 
     /// Fetch the curated voice list: `[(id, label)]`.
-    func voices(completion: @escaping ([(id: String, label: String)]) -> Void) {
-        guard let url = url("/voices") else { completion([]); return }
+    func voices(engine: SpeechEngine, completion: @escaping ([(id: String, label: String)]) -> Void) {
+        guard let url = url("/voices?engine=\(engine.rawValue)") else { completion([]); return }
         URLSession.shared.dataTask(with: url) { data, _, _ in
             guard let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

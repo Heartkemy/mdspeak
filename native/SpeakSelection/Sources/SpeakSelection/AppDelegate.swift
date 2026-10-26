@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// load) bumps it so a worker reply that lands later can't start audio the
     /// user already cancelled.
     private var speakToken = 0
+    private var activeJobId: String?
     /// Safety net: clears the hourglass if no audio has started within a bound.
     private var generatingWatchdog: Timer?
 
@@ -130,9 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func handlePlaybackFailure() {
-        stopGeneratingWatchdog()
-        speakToken &+= 1
-        setState(.idle)
+        stop()
         NSSound.beep()
     }
 
@@ -153,15 +152,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func speak() {
         let text = SelectionReader.selectedText() ?? SelectionReader.clipboardText()
         guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        stop()
         let voice = AppSettings.voice
         let calm = AppSettings.calm
         speakToken &+= 1
         let token = speakToken
         setState(.generating)
         startGeneratingWatchdog()
-        worker.speak(text: text, voice: voice, calm: calm) { [weak self] job in
+        worker.speak(text: text, engine: AppSettings.engine, voice: voice, calm: calm) { [weak self] job in
             DispatchQueue.main.async {
-                guard let self, token == self.speakToken else { return } // stopped meanwhile
+                guard let self else { return }
+                guard token == self.speakToken else {
+                    if let job { self.worker.cancel(jobId: job.id) }
+                    return
+                }
                 guard let job else {
                     self.stopGeneratingWatchdog()
                     self.setState(.idle)
@@ -171,6 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // Stay on the hourglass (watchdog still armed) until the first
                 // segment is actually audible.
                 let id = job.id
+                self.activeJobId = id
                 let count = job.segments
                 self.player.playSegments(total: count, rate: Float(AppSettings.speed)) { [weak self] index in
                     self?.worker.fetchSegment(jobId: id, index: index)
@@ -180,6 +185,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func stop() {
+        if let id = activeJobId { worker.cancel(jobId: id) }
+        activeJobId = nil
         speakToken &+= 1
         stopGeneratingWatchdog()
         player.stop()
@@ -192,12 +199,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// after a speak, the worker is wedged — bail out and beep.
     private func startGeneratingWatchdog() {
         stopGeneratingWatchdog()
-        generatingWatchdog = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+        // Allow the worker's bounded cloud request to finish or report its error.
+        generatingWatchdog = Timer.scheduledTimer(withTimeInterval: 150, repeats: false) { [weak self] _ in
             guard let self else { return }
             if self.state == .generating {
-                self.speakToken &+= 1
-                self.player.stop()
-                self.setState(.idle)
+                self.stop()
                 NSSound.beep()
             }
         }
@@ -277,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func quit() {
-        player.stop()
+        stop()
         worker.stop()
         NSApp.terminate(nil)
     }

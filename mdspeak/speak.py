@@ -1,24 +1,8 @@
-"""Speak Selection worker — the warm, headless half of the menu-bar app.
+"""Headless speech worker for the native Speak Selection app.
 
-The Swift shell (``native/SpeakSelection``) POSTs selected text here and plays
-the WAV it gets back. This process is the long-lived HTTP worker the spec calls
-for: it stays up for the shell's whole lifetime and holds the Kokoro model warm.
-
-Two processes, one repo:
-
-- **This** FastAPI server, run by the ``mdspeak`` venv (which has HTTP deps).
-- ``kokoro_serve.py``, run by the ``mlx-audio`` venv python (which has the model
-  but no HTTP stack). It loads Kokoro once and renders text to WAV over
-  stdin/stdout JSON.
-
-Splitting them is the same shape as the read-aloud sidecar (Node HTTP +
-``synthesize.py --serve``): ``engine.synth_chunk`` shells out per call and pays a
-~5 s model load every selection, which is exactly what would make a hotkey feel
-dead. Instead the model loads once here, and a short selection renders
-near-instantly.
-
-Speech is the selection **as prose**: markdown is normalized via
-``mdspeak.normalize`` before it reaches the model, so syntax is never voiced.
+Kokoro is the supported local default.  Separately configured cloud engines
+remain optional per request; all paths normalize markdown and publish WAV
+segments for incremental playback.
 """
 
 from __future__ import annotations
@@ -33,9 +17,10 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Annotated, Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -50,8 +35,10 @@ SERVE_SCRIPT = Path(__file__).parent / "kokoro_serve.py"
 # request means "use the default". Kept separate from VOICE so the module-level
 # constant (used as the fallback in kokoro_serve and elsewhere) never mutates.
 _default_voice = VOICE
+_default_engine = "kokoro"
 
 app = FastAPI(title="mdspeak-speak")
+EngineKey = Literal["cloudflare", "gemini", "kokoro"]
 
 
 @app.middleware("http")
@@ -61,6 +48,7 @@ async def local_only(request: Request, call_next):
 
 class SpeakIn(BaseModel):
     text: str
+    engine: EngineKey | None = None
     voice: str = ""
     calm: bool = False  # heavier pauses (CALM_PAUSE) for dense text
 
@@ -71,6 +59,7 @@ class SpeakJob:
     total: int
     done: int = 0
     error: str = ""
+    cancel: threading.Event = field(default_factory=threading.Event)
     cond: threading.Condition = field(default_factory=threading.Condition)
 
 
@@ -129,7 +118,21 @@ def _ensure_proc() -> None:
 
 
 @app.get("/health")
-def health() -> dict:
+def health(engine_key: Annotated[EngineKey | None, Query(alias="engine")] = None) -> dict:
+    provider = engine_key or _default_engine
+    if provider == "cloudflare":
+        try:
+            engine.cloudflare_credentials()
+            return {"ok": True, "ready": True, "error": ""}
+        except engine.SynthError as exc:
+            return {"ok": False, "ready": False, "error": str(exc)}
+    if provider == "gemini":
+        try:
+            ready = bool(engine.gemini_api_key())
+            error = "" if ready else "Set GEMINI_API_KEY in the project .env file"
+        except engine.SynthError as exc:
+            ready, error = False, str(exc)
+        return {"ok": ready, "ready": ready, "error": error}
     if _proc is None and not engine.mlx_audio_python():
         return {"ok": False, "ready": False, "error": engine.mlx_audio_error(needs_python=True)}
     alive = _proc is not None and _proc.poll() is None
@@ -137,8 +140,10 @@ def health() -> dict:
 
 
 @app.get("/voices")
-def voices() -> dict:
-    return {"voices": [{"id": v, "label": lbl} for v, lbl in engine.KOKORO_VOICES]}
+def voices(engine_key: Annotated[EngineKey | None, Query(alias="engine")] = None) -> dict:
+    choices = {"cloudflare": engine.CLOUDFLARE_VOICES,
+               "gemini": engine.GEMINI_VOICES, "kokoro": engine.KOKORO_VOICES}[engine_key or _default_engine]
+    return {"voices": [{"id": v, "label": lbl} for v, lbl in choices]}
 
 
 @app.post("/speak")
@@ -149,14 +154,32 @@ def speak(body: SpeakIn) -> dict:
     text = normalize(body.text)
     if not text.strip():
         raise HTTPException(400, "nothing to speak")
-    if not engine.mlx_audio_python():
-        raise HTTPException(503, engine.mlx_audio_error(needs_python=True))
+    # Capture the engine for this job; changing the UI must not reroute its chunks.
+    body.engine = body.engine or _default_engine
+    if body.engine == "kokoro":
+        if not engine.mlx_audio_python():
+            raise HTTPException(503, engine.mlx_audio_error(needs_python=True))
+    else:
+        status = health(body.engine)
+        if not status["ready"]:
+            raise HTTPException(503, status["error"])
 
     chunks = engine.chunk(text)
     job = SpeakJob(id=uuid.uuid4().hex[:12], total=len(chunks))
     JOBS[job.id] = job
     threading.Thread(target=_render, args=(job, chunks, body), daemon=True).start()
     return {"id": job.id, "segments": job.total}
+
+
+@app.post("/cancel/{job_id}")
+def cancel(job_id: str) -> dict:
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    with job.cond:
+        job.cancel.set()
+        job.cond.notify_all()
+    return {"ok": True}
 
 
 @app.get("/segment/{job_id}/{index}.wav")
@@ -169,7 +192,9 @@ def segment(job_id: str, index: int) -> Response:
         raise HTTPException(404, "no such segment")
     path = JOBS_DIR / job_id / f"{index:04d}.wav"
     with job.cond:
-        job.cond.wait_for(lambda: path.exists() or bool(job.error), timeout=600)
+        job.cond.wait_for(lambda: path.exists() or bool(job.error) or job.cancel.is_set(), timeout=600)
+    if job.cancel.is_set():
+        raise HTTPException(409, "speech cancelled")
     if job.error:
         raise HTTPException(500, job.error)
     if not path.exists():
@@ -180,14 +205,18 @@ def segment(job_id: str, index: int) -> Response:
 def _render(job: SpeakJob, chunks: list[str], body: SpeakIn) -> None:
     """Render each chunk to its own WAV, in order, marking progress as it goes."""
     out_dir = JOBS_DIR / job.id
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    provider = body.engine or _default_engine
     try:
-        _ensure_proc()
-        if not _ready.wait(timeout=600) or not _proc_ready:
-            raise RuntimeError(_proc_error or "generator not ready")
+        if provider == "kokoro":
+            _ensure_proc()
+            if not _ready.wait(timeout=600) or not _proc_ready:
+                raise RuntimeError(_proc_error or "generator not ready")
         for i, piece in enumerate(chunks):
+            if job.cancel.is_set():
+                return
             dest = out_dir / f"{i:04d}.wav"
-            _render_piece(piece, dest, body.voice, body.calm)
+            _render_piece(piece, dest, body.voice, body.calm, provider)
             with job.cond:
                 job.done = i + 1
                 job.cond.notify_all()
@@ -197,15 +226,29 @@ def _render(job: SpeakJob, chunks: list[str], body: SpeakIn) -> None:
             job.cond.notify_all()
 
 
-def _render_piece(text: str, dest: Path, voice: str, calm: bool) -> None:
-    """One round-trip through the warm generator: text in, WAV out, to `dest`."""
+def _render_piece(text: str, dest: Path, voice: str, calm: bool, provider: str) -> None:
+    """Publish a segment only after synthesis and pause processing are complete."""
+    default_voice = _default_voice if provider == _default_engine else ""
+    if provider in {"cloudflare", "gemini"}:
+        # Older app installs can still send a saved voice for another engine.
+        legacy_voices = engine.KOKORO_VOICES + (
+            engine.GEMINI_VOICES if provider == "cloudflare" else engine.CLOUDFLARE_VOICES
+        )
+        voice = voice or default_voice
+        if voice in {v for v, _ in legacy_voices}:
+            voice = ""
+        with tempfile.TemporaryDirectory(dir=dest.parent) as td:
+            wav = engine.synth_chunk(text, Path(td) / "out.wav", provider, voice=voice)
+            engine.breathe(wav, engine.CALM_PAUSE if calm else engine.DEFAULT_PAUSE)
+            wav.replace(dest)
+        return
     with _lock:
         with tempfile.TemporaryDirectory() as td:
             req_id = uuid.uuid4().hex[:12]
             out = Path(td) / "out.wav"
             _proc.stdin.write(
                 json.dumps(
-                    {"id": req_id, "text": text, "out": str(out), "voice": voice or _default_voice}
+                    {"id": req_id, "text": text, "out": str(out), "voice": voice or default_voice or VOICE}
                 )
                 + "\n"
             )
@@ -224,17 +267,20 @@ def _render_piece(text: str, dest: Path, voice: str, calm: bool) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Speak Selection warm worker")
+    parser = argparse.ArgumentParser(description="Speak Selection speech worker")
     parser.add_argument("--port", type=int, default=8799)
+    parser.add_argument("--engine", choices=["cloudflare", "gemini", "kokoro"], default="kokoro")
     parser.add_argument("--voice", default=VOICE)
     args = parser.parse_args()
 
-    global _default_voice
+    global _default_voice, _default_engine
     _default_voice = args.voice
+    _default_engine = args.engine
 
     # Warm the model in the background so /health reports honestly and the first
     # hotkey press doesn't pay the load.
-    threading.Thread(target=_spawn, daemon=True).start()
+    if _default_engine == "kokoro":
+        threading.Thread(target=_ensure_proc, daemon=True).start()
 
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
