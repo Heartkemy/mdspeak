@@ -1,12 +1,12 @@
 import Foundation
 
-/// User-facing settings, persisted in UserDefaults. The defaults mirror the
-/// spec: `bm_lewis`, 1× speed, calm off.
+/// User-facing settings, persisted in UserDefaults. The defaults use the
+/// built-in Kokoro voice bm_fable, 1× speed, and calm off.
 enum AppSettings {
     private static let defaults = UserDefaults.standard
 
     static var voice: String {
-        get { defaults.string(forKey: "voice") ?? "bm_lewis" }
+        get { defaults.string(forKey: "voice") ?? "bm_fable" }
         set { defaults.set(newValue, forKey: "voice") }
     }
 

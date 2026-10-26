@@ -35,14 +35,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 from mdspeak import engine
+from mdspeak.local import guard_local_request, require_text_size
 from mdspeak.normalize import normalize
 
-VOICE = "bm_lewis"
+VOICE = engine.KOKORO_DEFAULT_VOICE
 SERVE_SCRIPT = Path(__file__).parent / "kokoro_serve.py"
 
 # Mutable default voice: `--voice` on the CLI overrides it; an empty voice on a
@@ -51,6 +52,11 @@ SERVE_SCRIPT = Path(__file__).parent / "kokoro_serve.py"
 _default_voice = VOICE
 
 app = FastAPI(title="mdspeak-speak")
+
+
+@app.middleware("http")
+async def local_only(request: Request, call_next):
+    return await guard_local_request(request, call_next)
 
 
 class SpeakIn(BaseModel):
@@ -83,8 +89,11 @@ def _spawn() -> None:
     """Start the model-resident generator and wait for its ready banner."""
     global _proc, _proc_ready, _proc_error
     try:
+        runtime = engine.mlx_audio_python()
+        if not runtime:
+            raise RuntimeError(engine.mlx_audio_error(needs_python=True))
         proc = subprocess.Popen(
-            [str(engine.MLX_AUDIO_PY), str(SERVE_SCRIPT)],
+            [str(runtime), str(SERVE_SCRIPT)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=None,  # mlx-audio progress goes to the worker's own stderr
@@ -109,6 +118,7 @@ def _spawn() -> None:
 
 def _ensure_proc() -> None:
     """Idempotent: warm the generator, restarting it if it ever died."""
+    global _proc_ready, _proc_error
     with _lock:
         if _proc is not None and _proc.poll() is None:
             return
@@ -120,6 +130,8 @@ def _ensure_proc() -> None:
 
 @app.get("/health")
 def health() -> dict:
+    if _proc is None and not engine.mlx_audio_python():
+        return {"ok": False, "ready": False, "error": engine.mlx_audio_error(needs_python=True)}
     alive = _proc is not None and _proc.poll() is None
     return {"ok": alive and _proc_ready, "ready": _proc_ready, "error": _proc_error}
 
@@ -133,9 +145,12 @@ def voices() -> dict:
 def speak(body: SpeakIn) -> dict:
     """Queue a selection for speech. Rendered segment-by-segment so the shell
     can start playing the first chunk while the rest is still synthesizing."""
+    require_text_size(body.text)
     text = normalize(body.text)
     if not text.strip():
         raise HTTPException(400, "nothing to speak")
+    if not engine.mlx_audio_python():
+        raise HTTPException(503, engine.mlx_audio_error(needs_python=True))
 
     chunks = engine.chunk(text)
     job = SpeakJob(id=uuid.uuid4().hex[:12], total=len(chunks))
@@ -210,7 +225,6 @@ def _render_piece(text: str, dest: Path, voice: str, calm: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Speak Selection warm worker")
-    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8799)
     parser.add_argument("--voice", default=VOICE)
     args = parser.parse_args()
@@ -222,7 +236,7 @@ def main() -> None:
     # hotkey press doesn't pay the load.
     threading.Thread(target=_spawn, daemon=True).start()
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

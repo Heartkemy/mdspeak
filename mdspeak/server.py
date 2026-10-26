@@ -12,17 +12,23 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from mdspeak import engine
+from mdspeak.local import guard_local_request, require_text_size
 from mdspeak.normalize import leaked_syntax, normalize
 
 WEB = Path(__file__).parent / "web"
 JOBS_DIR = Path.home() / ".cache/mdspeak/jobs"
 
 app = FastAPI(title="mdspeak")
+
+
+@app.middleware("http")
+async def local_only(request: Request, call_next):
+    return await guard_local_request(request, call_next)
 
 
 @dataclass
@@ -71,6 +77,7 @@ def api_engines() -> dict:
 @app.post("/api/preview")
 def api_preview(body: PreviewIn) -> dict:
     """The exact string the engine will be fed. This is the A7 receipt."""
+    require_text_size(body.markdown)
     text = normalize(body.markdown, read_code=body.read_code)
     return {
         "text": text,
@@ -82,6 +89,7 @@ def api_preview(body: PreviewIn) -> dict:
 
 @app.post("/api/speak")
 def api_speak(body: SpeakIn) -> dict:
+    require_text_size(body.markdown)
     text = normalize(body.markdown, read_code=body.read_code)
     if not text.strip():
         raise HTTPException(400, "nothing to read")

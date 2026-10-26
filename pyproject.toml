@@ -1,6 +1,9 @@
 [project]
 name = "mdspeak"
 version = "0.1.0"
+description = "Experimental local Markdown text-to-speech tools for Apple Silicon Macs"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115",
@@ -21,6 +24,10 @@ mdspeak-speak = "mdspeak.speak:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "httpx>=0.27"]
+
+[project.urls]
+Repository = "https://github.com/Heartkemy/mdspeak"
+Issues = "https://github.com/Heartkemy/mdspeak/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

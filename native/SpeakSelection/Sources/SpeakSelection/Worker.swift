@@ -9,9 +9,9 @@ struct SpeakJob {
 /// ready, POSTs selected text, and terminates it when the shell quits. The
 /// worker is what holds the Kokoro model warm; this shell just talks HTTP.
 final class Worker {
-    /// Absolute path to the worker executable. Overridable at runtime via the
-    /// `workerPath` preference (e.g. `defaults write com.mdspeak.SpeakSelection workerPath ...`).
-    static let defaultPath = "/Users/rafaelhorvat/__code__/mdspeak/.venv/bin/mdspeak-speak"
+    /// A UserDefaults override is intentionally first: it is the escape hatch
+    /// for an app launched outside a shell with a configured PATH.
+    private static let workerPathKey = "workerPath"
 
     let port: UInt16
     private var process: Process?
@@ -20,14 +20,54 @@ final class Worker {
         self.port = port
     }
 
-    var executable: String {
-        UserDefaults.standard.string(forKey: "workerPath") ?? Self.defaultPath
+    var executable: String? {
+        if let override = UserDefaults.standard.string(forKey: Self.workerPathKey),
+           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return Self.executable(at: override)
+        }
+        if let configured = ProcessInfo.processInfo.environment["MDSPEAK_SPEAK_COMMAND"],
+           !configured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return Self.executable(at: configured)
+        }
+        return Self.commandOnPath("mdspeak-speak")
+    }
+
+    var configurationError: String {
+        if let override = UserDefaults.standard.string(forKey: Self.workerPathKey),
+           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "workerPath is not executable: " + override
+        }
+        if let configured = ProcessInfo.processInfo.environment["MDSPEAK_SPEAK_COMMAND"],
+           !configured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "MDSPEAK_SPEAK_COMMAND is not executable: " + configured
+        }
+        return "Install mdspeak, put mdspeak-speak on PATH, or set MDSPEAK_SPEAK_COMMAND."
+    }
+
+    private static func executable(at path: String) -> String? {
+        let expanded = (path as NSString).expandingTildeInPath
+        return FileManager.default.isExecutableFile(atPath: expanded) ? expanded : nil
+    }
+
+    private static func commandOnPath(_ command: String) -> String? {
+        let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        for directory in path.split(separator: ":") {
+            let candidate = URL(fileURLWithPath: String(directory)).appendingPathComponent(command).path
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     // ---------------------------------------------------------------- lifecycle
 
     func start() {
         guard process == nil else { return }
+        guard let executable else {
+            NSLog("SpeakSelection: %@", configurationError)
+            return
+        }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: executable)
         proc.arguments = ["--port", String(port)]
@@ -39,6 +79,7 @@ final class Worker {
             process = proc
         } catch {
             process = nil
+            NSLog("SpeakSelection: could not start %@: %@", executable, error.localizedDescription)
         }
     }
 

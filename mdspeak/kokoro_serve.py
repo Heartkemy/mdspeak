@@ -40,8 +40,8 @@ sys.stdout = sys.stderr
 from mlx_audio.tts.generate import generate_audio  # noqa: E402
 from mlx_audio.tts.utils import load_model  # noqa: E402
 
-DEFAULT_MODEL = "prince-canuma/Kokoro-82M"
-DEFAULT_VOICE = "bm_lewis"
+DEFAULT_MODEL = os.environ.get("MDSPEAK_KOKORO_MODEL", "mlx-community/Kokoro-82M-8bit")
+DEFAULT_VOICE = "bm_fable"
 
 
 def lang_code_for(voice: str) -> str:

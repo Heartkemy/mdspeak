@@ -131,7 +131,7 @@ def test_tilde_in_prose_does_not_raise_through_the_api():
     from mdspeak.server import app
     from fastapi.testclient import TestClient
 
-    r = TestClient(app).post(
+    r = TestClient(app, base_url="http://127.0.0.1").post(
         "/api/preview", json={"markdown": "Run it in ~/.claude — takes ~5 s."}
     ).json()
     assert r["leaks"] == []
